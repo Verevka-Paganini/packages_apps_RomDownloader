@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">13T Firmware</string>
+    <string name="title_with_device">Прошивки (%1$s)</string>
+    <string name="available_builds">Доступные сборки</string>
+    <string name="btn_refresh">Обновить</string>
+    <string name="btn_download">Скачать ZIP</string>
+    <string name="no_builds_found">Прошивки не найдены</string>
+    <string name="root_folder">Корневой каталог</string>
+    <string name="build_details">Дата: %1$s  •  Размер: %2$s</string>
+    <string name="size_unknown">Неизвестно</string>
+    <string name="download_description">Загрузка прошивки с SourceForge</string>
+    <string name="toast_download_started">Загрузка начата: %1$s</string>
+    <string name="toast_error">Ошибка: %1$s</string>
+    <string name="error_loading">Ошибка загрузки (%1$s):\n%2$s</string>
+    <string-array name="file_size_units">
+        <item>Б</item>
+        <item>КБ</item>
+        <item>МБ</item>
+        <item>ГБ</item>
+    </string-array>
+</resources>
