@@ -22,7 +22,8 @@ sealed class DownloadStatus {
         val totalBytes: Long,
         val speedBytesPerSec: Long
     ) : DownloadStatus()
-    data object Completed : DownloadStatus()
+    data object Verifying : DownloadStatus()
+    data class Completed(val sha256: String) : DownloadStatus()
     data class Failed(val error: String) : DownloadStatus()
 }
 
@@ -111,7 +112,12 @@ class DownloadService : Service() {
                 acquireWakeLock()
                 DownloadStateHolder.update(fileName, DownloadStatus.Preparing)
 
-                val initialNotif = buildProgressNotification(fileName, 0, true)
+                val initialNotif = buildProgressNotification(
+                    fileName = fileName,
+                    progressPercent = 0,
+                    indeterminate = true,
+                    statusText = getString(R.string.download_preparing)
+                )
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
                         FOREGROUND_NOTIF_ID,
@@ -136,19 +142,33 @@ class DownloadService : Service() {
                         } else {
                             0
                         }
+                        val subText = if (totalBytes <= 0) getString(R.string.download_preparing) else "$percent%"
                         notificationManager.notify(
                             FOREGROUND_NOTIF_ID,
-                            buildProgressNotification(fileName, percent, totalBytes <= 0)
+                            buildProgressNotification(fileName, percent, totalBytes <= 0, subText)
                         )
                     }
 
-                    override fun onCompleted(fileName: String) {
+                    override fun onVerifying() {
+                        DownloadStateHolder.update(fileName, DownloadStatus.Verifying)
+                        notificationManager.notify(
+                            FOREGROUND_NOTIF_ID,
+                            buildProgressNotification(
+                                fileName = fileName,
+                                progressPercent = 100,
+                                indeterminate = true,
+                                statusText = getString(R.string.download_verifying)
+                            )
+                        )
+                    }
+
+                    override fun onCompleted(fileName: String, sha256: String) {
                         activeDownloaders.remove(fileName)
-                        DownloadStateHolder.update(fileName, DownloadStatus.Completed)
+                        DownloadStateHolder.update(fileName, DownloadStatus.Completed(sha256))
                         showResultNotification(
                             fileName.hashCode(),
                             getString(R.string.notif_completed_title),
-                            fileName
+                            "$fileName\nSHA-256: ${sha256.take(16)}…"
                         )
                         stopIfIdle()
                     }
@@ -214,7 +234,8 @@ class DownloadService : Service() {
     private fun buildProgressNotification(
         fileName: String,
         progressPercent: Int,
-        indeterminate: Boolean
+        indeterminate: Boolean,
+        statusText: String
     ): Notification {
         val openAppIntent = PendingIntent.getActivity(
             this,
@@ -243,7 +264,7 @@ class DownloadService : Service() {
         return builder
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(getString(R.string.notif_downloading_title, fileName))
-            .setContentText(if (indeterminate) getString(R.string.download_preparing) else "$progressPercent%")
+            .setContentText(statusText)
             .setProgress(100, progressPercent, indeterminate)
             .setOngoing(true)
             .setContentIntent(openAppIntent)
@@ -269,6 +290,7 @@ class DownloadService : Service() {
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle(title)
             .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setAutoCancel(true)
             .build()
 

@@ -11,8 +11,11 @@
     <string name="build_details">Date: %1$s  •  Size: %2$s</string>
     <string name="size_unknown">Unknown</string>
     <string name="download_preparing">Connecting to mirror…</string>
+    <string name="download_verifying">Verifying ZIP &amp; SHA-256…</string>
     <string name="download_progress">%1$d%%  •  %2$s/s  (%3$s / %4$s)</string>
     <string name="download_completed">Saved to Downloads</string>
+    <string name="sha256_tap_copy">SHA-256: %1$s… (tap to copy)</string>
+    <string name="toast_sha256_copied">SHA-256 copied to clipboard</string>
     <string name="notif_channel_name">Firmware Downloads</string>
     <string name="notif_downloading_title">Downloading %1$s</string>
     <string name="notif_completed_title">Download complete</string>

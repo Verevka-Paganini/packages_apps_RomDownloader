@@ -2,6 +2,8 @@ package org.lineageos.romdownloader
 
 import android.Manifest
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -613,16 +615,47 @@ class MainActivity : Activity() {
                     cardLayout.addView(progressText)
                 }
 
+                is DownloadStatus.Verifying -> {
+                    val verifyBar = ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
+                        isIndeterminate = true
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(4) }
+                    }
+                    val verifyText = TextView(this@MainActivity).apply {
+                        text = getString(R.string.download_verifying)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setTypeface(null, Typeface.BOLD)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(8) }
+                    }
+                    cardLayout.addView(verifyBar)
+                    cardLayout.addView(verifyText)
+                }
+
                 is DownloadStatus.Completed -> {
+                    val shortHash = status.sha256.take(16)
                     val doneText = TextView(this@MainActivity).apply {
-                        text = "✅ ${getString(R.string.download_completed)}"
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        text = "✅ ${getString(R.string.download_completed)}\n${getString(R.string.sha256_tap_copy, shortHash)}"
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         setTextColor(Color.parseColor("#4CAF50"))
                         setTypeface(null, Typeface.BOLD)
                         layoutParams = LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply { bottomMargin = dp(8) }
+                        setOnClickListener {
+                            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("SHA-256", status.sha256))
+                            Toast.makeText(
+                                this@MainActivity,
+                                getString(R.string.toast_sha256_copied),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     }
                     cardLayout.addView(doneText)
                 }
@@ -643,7 +676,9 @@ class MainActivity : Activity() {
                 null -> Unit
             }
 
-            val isDownloading = status is DownloadStatus.Preparing || status is DownloadStatus.Running
+            val isDownloading = status is DownloadStatus.Preparing ||
+                status is DownloadStatus.Running ||
+                status is DownloadStatus.Verifying
             val actionBtn = Button(this@MainActivity).apply {
                 text = if (isDownloading) getString(R.string.btn_cancel) else getString(R.string.btn_download)
                 layoutParams = LinearLayout.LayoutParams(

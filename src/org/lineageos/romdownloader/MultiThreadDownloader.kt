@@ -12,10 +12,12 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.zip.ZipFile
 
 class MultiThreadDownloader(
     private val context: Context,
@@ -23,7 +25,8 @@ class MultiThreadDownloader(
 ) {
     interface Listener {
         fun onProgress(downloadedBytes: Long, totalBytes: Long, speedBytesPerSec: Long)
-        fun onCompleted(fileName: String)
+        fun onVerifying()
+        fun onCompleted(fileName: String, sha256: String)
         fun onError(error: String)
     }
 
@@ -37,13 +40,12 @@ class MultiThreadDownloader(
     fun download(downloadUrl: String, fileName: String, listener: Listener) {
         val managerExecutor = Executors.newSingleThreadExecutor()
         managerExecutor.execute {
+            val tempFile = File(context.cacheDir, "$fileName.part")
             try {
                 val probe = resolveDirectUrl(downloadUrl)
                 val directUrl = probe.finalUrl
                 val totalBytes = probe.contentLength
                 val supportsRanges = probe.supportsRanges
-
-                val tempFile = File(context.cacheDir, "$fileName.part")
                 if (tempFile.exists()) tempFile.delete()
 
                 val effectiveThreads = if (supportsRanges && totalBytes > 1024 * 1024) threadCount else 1
@@ -113,12 +115,27 @@ class MultiThreadDownloader(
                     return@execute
                 }
 
+                mainHandler.post { listener.onVerifying() }
+
+                if (totalBytes > 0 && tempFile.length() != totalBytes) {
+                    throw IllegalStateException("Size mismatch: ${tempFile.length()} != $totalBytes")
+                }
+
+                verifyZipStructure(tempFile)
+                val sha256 = computeFileSha256(tempFile)
+
+                if (isCancelled.get()) {
+                    tempFile.delete()
+                    return@execute
+                }
+
                 moveToDownloads(tempFile, fileName)
 
                 mainHandler.post {
-                    listener.onCompleted(fileName)
+                    listener.onCompleted(fileName, sha256)
                 }
             } catch (e: Exception) {
+                tempFile.delete()
                 if (!isCancelled.get()) {
                     mainHandler.post {
                         listener.onError(e.localizedMessage ?: e.javaClass.simpleName)
@@ -128,6 +145,37 @@ class MultiThreadDownloader(
                 managerExecutor.shutdown()
             }
         }
+    }
+
+    private fun verifyZipStructure(file: File) {
+        try {
+            ZipFile(file).use { zip ->
+                val entries = zip.entries()
+                if (!entries.hasMoreElements()) {
+                    throw IllegalStateException("ZIP archive is empty")
+                }
+                while (entries.hasMoreElements()) {
+                    entries.nextElement()
+                }
+            }
+        } catch (e: Exception) {
+            throw IllegalStateException("Corrupted ZIP: ${e.message}")
+        }
+    }
+
+    private fun computeFileSha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(65536)
+            var bytesRead: Int
+            while (input.read(buffer).also { bytesRead = it } != -1) {
+                if (isCancelled.get()) {
+                    throw InterruptedException("Cancelled during SHA-256 calculation")
+                }
+                digest.update(buffer, 0, bytesRead)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private data class ProbeResult(

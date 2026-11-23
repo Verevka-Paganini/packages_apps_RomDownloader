@@ -11,8 +11,11 @@
     <string name="build_details">Дата: %1$s  •  Размер: %2$s</string>
     <string name="size_unknown">Неизвестно</string>
     <string name="download_preparing">Подключение к зеркалу…</string>
+    <string name="download_verifying">Проверка ZIP и SHA-256…</string>
     <string name="download_progress">%1$d%%  •  %2$s/с  (%3$s / %4$s)</string>
     <string name="download_completed">Сохранено в Загрузки</string>
+    <string name="sha256_tap_copy">SHA-256: %1$s… (нажми, чтобы скопировать)</string>
+    <string name="toast_sha256_copied">SHA-256 скопирован в буфер обмена</string>
     <string name="notif_channel_name">Загрузка прошивок</string>
     <string name="notif_downloading_title">Загрузка %1$s</string>
     <string name="notif_completed_title">Загрузка завершена</string>
