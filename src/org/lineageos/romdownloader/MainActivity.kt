@@ -1,14 +1,14 @@
 package org.lineageos.romdownloader
 
+import android.Manifest
 import android.app.Activity
-import android.app.DownloadManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
@@ -57,6 +57,10 @@ class MainActivity : Activity() {
         private const val PROJECT_NAME = "oneplus-pagani"
         private const val DEVICE_FOLDER = ""
 
+        private const val PREFS_NAME = "rom_downloader_prefs"
+        private const val KEY_THREAD_COUNT = "thread_count"
+        private val THREAD_OPTIONS = listOf(2, 4, 6, 8)
+
         val RSS_URL: String
             get() = "https://sourceforge.net/projects/$PROJECT_NAME/rss?limit=100"
     }
@@ -68,27 +72,66 @@ class MainActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var listView: ListView
     private lateinit var refreshButton: Button
+    private lateinit var threadsButton: Button
+
+    private var selectedThreads: Int = DownloadService.DEFAULT_THREADS
 
     private var groupedBuilds: Map<String, List<RomBuild>> = emptyMap()
     private var sortedFolderKeys: List<String> = emptyList()
-
     private val expandedFolders = mutableSetOf<String>()
 
     private lateinit var adapter: RomAdapter
 
+    private val downloadStateListener: () -> Unit = {
+        adapter.notifyDataSetChanged()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val saved = prefs.getInt(KEY_THREAD_COUNT, DownloadService.DEFAULT_THREADS)
+        selectedThreads = if (saved in THREAD_OPTIONS) saved else DownloadService.DEFAULT_THREADS
 
         val deviceTitle = DEVICE_FOLDER.ifEmpty { PROJECT_NAME }
         title = getString(R.string.title_with_device, deviceTitle)
 
+        requestNotificationPermissionIfNeeded()
         setupUi()
+        DownloadStateHolder.addListener(downloadStateListener)
         loadRssFeed()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        DownloadStateHolder.removeListener(downloadStateListener)
         executor.shutdownNow()
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+            }
+        }
+    }
+
+    private fun cycleThreadCount() {
+        val currentIndex = THREAD_OPTIONS.indexOf(selectedThreads)
+        val nextIndex = if (currentIndex == -1) 0 else (currentIndex + 1) % THREAD_OPTIONS.size
+        selectedThreads = THREAD_OPTIONS[nextIndex]
+
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_THREAD_COUNT, selectedThreads)
+            .apply()
+
+        threadsButton.text = getString(R.string.threads_format, selectedThreads)
+        Toast.makeText(
+            this,
+            getString(R.string.toast_threads_set, selectedThreads),
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     private fun setupUi() {
@@ -119,12 +162,27 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
+        threadsButton = Button(this).apply {
+            text = getString(R.string.threads_format, selectedThreads)
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = dp(8)
+            }
+            setOnClickListener { cycleThreadCount() }
+        }
+
         refreshButton = Button(this).apply {
             text = getString(R.string.btn_refresh)
             setOnClickListener { loadRssFeed() }
         }
 
         topBar.addView(headerText)
+        topBar.addView(threadsButton)
         topBar.addView(refreshButton)
         rootLayout.addView(topBar)
 
@@ -253,31 +311,22 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startSystemDownload(build: RomBuild) {
-        try {
-            val request = DownloadManager.Request(Uri.parse(build.downloadUrl)).apply {
-                setTitle(build.fileName)
-                setDescription(getString(R.string.download_description))
-                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, build.fileName)
-                addRequestHeader("User-Agent", "Wget/1.21.4")
-            }
+    private fun startMultiThreadDownload(build: RomBuild) {
+        DownloadService.startDownload(this, build.downloadUrl, build.fileName, selectedThreads)
+        Toast.makeText(
+            this,
+            getString(R.string.toast_download_started, selectedThreads, build.fileName),
+            Toast.LENGTH_SHORT
+        ).show()
+    }
 
-            val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            downloadManager.enqueue(request)
-
-            Toast.makeText(
-                this,
-                getString(R.string.toast_download_started, build.fileName),
-                Toast.LENGTH_SHORT
-            ).show()
-        } catch (e: Exception) {
-            Toast.makeText(
-                this,
-                getString(R.string.toast_error, e.message ?: ""),
-                Toast.LENGTH_LONG
-            ).show()
-        }
+    private fun cancelMultiThreadDownload(build: RomBuild) {
+        DownloadService.cancelDownload(this, build.fileName)
+        Toast.makeText(
+            this,
+            getString(R.string.toast_download_cancelled),
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     private fun fetchSourceForgeRss(rssUrl: String): List<RomBuild> {
@@ -469,6 +518,8 @@ class MainActivity : Activity() {
         }
 
         private fun createBuildCardView(build: RomBuild): View {
+            val status = DownloadStateHolder.getStatus(build.fileName)
+
             val cardBackground = GradientDrawable().apply {
                 cornerRadius = dp(12).toFloat()
                 setColor(Color.parseColor("#14888888"))
@@ -496,25 +547,121 @@ class MainActivity : Activity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     topMargin = dp(6)
-                    bottomMargin = dp(10)
+                    bottomMargin = dp(8)
                 }
             }
 
-            val downloadBtn = Button(this@MainActivity).apply {
-                text = getString(R.string.btn_download)
+            cardLayout.addView(nameView)
+            cardLayout.addView(detailsView)
+
+            when (status) {
+                is DownloadStatus.Preparing -> {
+                    val prepBar = ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
+                        isIndeterminate = true
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(4) }
+                    }
+                    val prepText = TextView(this@MainActivity).apply {
+                        text = getString(R.string.download_preparing)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(8) }
+                    }
+                    cardLayout.addView(prepBar)
+                    cardLayout.addView(prepText)
+                }
+
+                is DownloadStatus.Running -> {
+                    val percent = if (status.totalBytes > 0) {
+                        ((status.downloadedBytes * 100) / status.totalBytes).toInt().coerceIn(0, 100)
+                    } else {
+                        0
+                    }
+                    val dlProgressBar = ProgressBar(
+                        this@MainActivity,
+                        null,
+                        android.R.attr.progressBarStyleHorizontal
+                    ).apply {
+                        max = 100
+                        progress = percent
+                        isIndeterminate = status.totalBytes <= 0
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(4) }
+                    }
+                    val progressText = TextView(this@MainActivity).apply {
+                        text = getString(
+                            R.string.download_progress,
+                            percent,
+                            formatFileSize(status.speedBytesPerSec),
+                            formatFileSize(status.downloadedBytes),
+                            formatFileSize(status.totalBytes)
+                        )
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setTypeface(null, Typeface.BOLD)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(8) }
+                    }
+                    cardLayout.addView(dlProgressBar)
+                    cardLayout.addView(progressText)
+                }
+
+                is DownloadStatus.Completed -> {
+                    val doneText = TextView(this@MainActivity).apply {
+                        text = "✅ ${getString(R.string.download_completed)}"
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setTextColor(Color.parseColor("#4CAF50"))
+                        setTypeface(null, Typeface.BOLD)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(8) }
+                    }
+                    cardLayout.addView(doneText)
+                }
+
+                is DownloadStatus.Failed -> {
+                    val errText = TextView(this@MainActivity).apply {
+                        text = "❌ ${status.error}"
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setTextColor(Color.parseColor("#F44336"))
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(8) }
+                    }
+                    cardLayout.addView(errText)
+                }
+
+                null -> Unit
+            }
+
+            val isDownloading = status is DownloadStatus.Preparing || status is DownloadStatus.Running
+            val actionBtn = Button(this@MainActivity).apply {
+                text = if (isDownloading) getString(R.string.btn_cancel) else getString(R.string.btn_download)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     gravity = Gravity.END
                 }
-                setOnClickListener { startSystemDownload(build) }
+                setOnClickListener {
+                    if (isDownloading) {
+                        cancelMultiThreadDownload(build)
+                    } else {
+                        startMultiThreadDownload(build)
+                    }
+                }
             }
 
-            cardLayout.addView(nameView)
-            cardLayout.addView(detailsView)
-            cardLayout.addView(downloadBtn)
-
+            cardLayout.addView(actionBtn)
             return cardLayout
         }
     }
