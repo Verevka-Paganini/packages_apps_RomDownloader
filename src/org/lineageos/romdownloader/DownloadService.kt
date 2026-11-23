@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 sealed class DownloadStatus {
@@ -21,6 +22,11 @@ sealed class DownloadStatus {
         val downloadedBytes: Long,
         val totalBytes: Long,
         val speedBytesPerSec: Long,
+        val mirrorHost: String = ""
+    ) : DownloadStatus()
+    data class Paused(
+        val downloadedBytes: Long,
+        val totalBytes: Long,
         val mirrorHost: String = ""
     ) : DownloadStatus()
     data object Verifying : DownloadStatus()
@@ -59,7 +65,10 @@ class DownloadService : Service() {
 
     companion object {
         const val ACTION_START = "org.lineageos.romdownloader.ACTION_START"
+        const val ACTION_PAUSE = "org.lineageos.romdownloader.ACTION_PAUSE"
         const val ACTION_CANCEL = "org.lineageos.romdownloader.ACTION_CANCEL"
+        const val ACTION_SWITCH_MIRROR = "org.lineageos.romdownloader.ACTION_SWITCH_MIRROR"
+
         const val EXTRA_URL = "extra_url"
         const val EXTRA_FILE_NAME = "extra_file_name"
         const val EXTRA_THREADS = "extra_threads"
@@ -91,6 +100,14 @@ class DownloadService : Service() {
             }
         }
 
+        fun pauseDownload(context: Context, fileName: String) {
+            val intent = Intent(context, DownloadService::class.java).apply {
+                action = ACTION_PAUSE
+                putExtra(EXTRA_FILE_NAME, fileName)
+            }
+            context.startService(intent)
+        }
+
         fun cancelDownload(context: Context, fileName: String) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_CANCEL
@@ -98,9 +115,25 @@ class DownloadService : Service() {
             }
             context.startService(intent)
         }
+
+        fun switchMirrorForActive(context: Context, newMirror: String) {
+            val intent = Intent(context, DownloadService::class.java).apply {
+                action = ACTION_SWITCH_MIRROR
+                putExtra(EXTRA_MIRROR, newMirror)
+            }
+            context.startService(intent)
+        }
     }
 
-    private val activeDownloaders = ConcurrentHashMap<String, MultiThreadDownloader>()
+    private data class ActiveTask(
+        val url: String,
+        val threads: Int,
+        val mirror: String,
+        val downloader: MultiThreadDownloader
+    )
+
+    private val activeTasks = ConcurrentHashMap<String, ActiveTask>()
+    private val pendingMirrorSwitch = ConcurrentHashMap<String, Pair<String, Int>>() // fileName -> (url, threads)
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var notificationManager: NotificationManager
 
@@ -111,113 +144,158 @@ class DownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val fileName = intent?.getStringExtra(EXTRA_FILE_NAME) ?: return START_NOT_STICKY
-
-        when (intent.action) {
+        when (intent?.action) {
             ACTION_START -> {
+                val fileName = intent.getStringExtra(EXTRA_FILE_NAME) ?: return START_NOT_STICKY
                 val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
                 val threads = intent.getIntExtra(EXTRA_THREADS, DEFAULT_THREADS).coerceIn(1, 16)
                 val mirror = intent.getStringExtra(EXTRA_MIRROR) ?: DEFAULT_MIRROR
-                if (activeDownloaders.containsKey(fileName)) return START_NOT_STICKY
+                launchDownload(fileName, url, threads, mirror)
+            }
 
-                acquireWakeLock()
-                DownloadStateHolder.update(fileName, DownloadStatus.Preparing)
-
-                val initialNotif = buildProgressNotification(
-                    fileName = fileName,
-                    progressPercent = 0,
-                    indeterminate = true,
-                    statusText = getString(R.string.download_preparing)
-                )
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        FOREGROUND_NOTIF_ID,
-                        initialNotif,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                    )
-                } else {
-                    startForeground(FOREGROUND_NOTIF_ID, initialNotif)
-                }
-
-                val downloader = MultiThreadDownloader(
-                    applicationContext,
-                    threadCount = threads,
-                    mirror = mirror
-                )
-                activeDownloaders[fileName] = downloader
-
-                downloader.download(url, fileName, object : MultiThreadDownloader.Listener {
-                    override fun onProgress(
-                        downloadedBytes: Long,
-                        totalBytes: Long,
-                        speedBytesPerSec: Long,
-                        mirrorHost: String
-                    ) {
-                        DownloadStateHolder.update(
-                            fileName,
-                            DownloadStatus.Running(downloadedBytes, totalBytes, speedBytesPerSec, mirrorHost)
-                        )
-                        val percent = if (totalBytes > 0) {
-                            ((downloadedBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
-                        } else {
-                            0
-                        }
-                        val subText = if (totalBytes <= 0) getString(R.string.download_preparing) else "$percent%"
-                        notificationManager.notify(
-                            FOREGROUND_NOTIF_ID,
-                            buildProgressNotification(fileName, percent, totalBytes <= 0, subText)
-                        )
-                    }
-
-                    override fun onVerifying() {
-                        DownloadStateHolder.update(fileName, DownloadStatus.Verifying)
-                        notificationManager.notify(
-                            FOREGROUND_NOTIF_ID,
-                            buildProgressNotification(
-                                fileName = fileName,
-                                progressPercent = 100,
-                                indeterminate = true,
-                                statusText = getString(R.string.download_verifying)
-                            )
-                        )
-                    }
-
-                    override fun onCompleted(fileName: String, sha256: String, mirrorHost: String) {
-                        activeDownloaders.remove(fileName)
-                        DownloadStateHolder.update(fileName, DownloadStatus.Completed(sha256, mirrorHost))
-                        showResultNotification(
-                            fileName.hashCode(),
-                            getString(R.string.notif_completed_title),
-                            "$fileName\nSHA-256: ${sha256.take(16)}…"
-                        )
-                        stopIfIdle()
-                    }
-
-                    override fun onError(error: String) {
-                        activeDownloaders.remove(fileName)
-                        DownloadStateHolder.update(fileName, DownloadStatus.Failed(error))
-                        showResultNotification(
-                            fileName.hashCode(),
-                            getString(R.string.notif_failed_title),
-                            "$fileName: $error"
-                        )
-                        stopIfIdle()
-                    }
-                })
+            ACTION_PAUSE -> {
+                val fileName = intent.getStringExtra(EXTRA_FILE_NAME) ?: return START_NOT_STICKY
+                activeTasks[fileName]?.downloader?.pause()
             }
 
             ACTION_CANCEL -> {
-                activeDownloaders.remove(fileName)?.cancel()
+                val fileName = intent.getStringExtra(EXTRA_FILE_NAME) ?: return START_NOT_STICKY
+                pendingMirrorSwitch.remove(fileName)
+                val removed = activeTasks.remove(fileName)
+                if (removed != null) {
+                    removed.downloader.cancel()
+                } else {
+                    File(cacheDir, "$fileName.part").delete()
+                    File(cacheDir, "$fileName.part.meta").delete()
+                }
                 DownloadStateHolder.update(fileName, null)
                 stopIfIdle()
+            }
+
+            ACTION_SWITCH_MIRROR -> {
+                val newMirror = intent.getStringExtra(EXTRA_MIRROR) ?: return START_NOT_STICKY
+                for ((fileName, task) in activeTasks) {
+                    if (task.mirror != newMirror) {
+                        pendingMirrorSwitch[fileName] = task.url to task.threads
+                        task.downloader.pause()
+                    }
+                }
             }
         }
 
         return START_NOT_STICKY
     }
 
+    private fun launchDownload(fileName: String, url: String, threads: Int, mirror: String) {
+        if (activeTasks.containsKey(fileName)) return
+
+        acquireWakeLock()
+        DownloadStateHolder.update(fileName, DownloadStatus.Preparing)
+
+        val initialNotif = buildProgressNotification(
+            fileName = fileName,
+            progressPercent = 0,
+            indeterminate = true,
+            statusText = getString(R.string.download_preparing)
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                FOREGROUND_NOTIF_ID,
+                initialNotif,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(FOREGROUND_NOTIF_ID, initialNotif)
+        }
+
+        val downloader = MultiThreadDownloader(
+            applicationContext,
+            threadCount = threads,
+            mirror = mirror
+        )
+        activeTasks[fileName] = ActiveTask(url, threads, mirror, downloader)
+
+        downloader.download(url, fileName, object : MultiThreadDownloader.Listener {
+            override fun onProgress(
+                downloadedBytes: Long,
+                totalBytes: Long,
+                speedBytesPerSec: Long,
+                mirrorHost: String
+            ) {
+                DownloadStateHolder.update(
+                    fileName,
+                    DownloadStatus.Running(downloadedBytes, totalBytes, speedBytesPerSec, mirrorHost)
+                )
+                val percent = if (totalBytes > 0) {
+                    ((downloadedBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
+                } else {
+                    0
+                }
+                val subText = if (totalBytes <= 0) getString(R.string.download_preparing) else "$percent%"
+                notificationManager.notify(
+                    FOREGROUND_NOTIF_ID,
+                    buildProgressNotification(fileName, percent, totalBytes <= 0, subText)
+                )
+            }
+
+            override fun onPaused(downloadedBytes: Long, totalBytes: Long, mirrorHost: String) {
+                activeTasks.remove(fileName)
+                val switchInfo = pendingMirrorSwitch.remove(fileName)
+                if (switchInfo != null) {
+                    val prefs = getSharedPreferences("rom_downloader_prefs", Context.MODE_PRIVATE)
+                    val latestMirror = prefs.getString("selected_mirror", DEFAULT_MIRROR) ?: DEFAULT_MIRROR
+                    launchDownload(fileName, switchInfo.first, switchInfo.second, latestMirror)
+                    return
+                }
+
+                DownloadStateHolder.update(
+                    fileName,
+                    DownloadStatus.Paused(downloadedBytes, totalBytes, mirrorHost)
+                )
+                stopIfIdle()
+            }
+
+            override fun onVerifying() {
+                DownloadStateHolder.update(fileName, DownloadStatus.Verifying)
+                notificationManager.notify(
+                    FOREGROUND_NOTIF_ID,
+                    buildProgressNotification(
+                        fileName = fileName,
+                        progressPercent = 100,
+                        indeterminate = true,
+                        statusText = getString(R.string.download_verifying)
+                    )
+                )
+            }
+
+            override fun onCompleted(fileName: String, sha256: String, mirrorHost: String) {
+                activeTasks.remove(fileName)
+                pendingMirrorSwitch.remove(fileName)
+                DownloadStateHolder.update(fileName, DownloadStatus.Completed(sha256, mirrorHost))
+                showResultNotification(
+                    fileName.hashCode(),
+                    getString(R.string.notif_completed_title),
+                    "$fileName\nSHA-256: ${sha256.take(16)}…"
+                )
+                stopIfIdle()
+            }
+
+            override fun onError(error: String) {
+                activeTasks.remove(fileName)
+                pendingMirrorSwitch.remove(fileName)
+                DownloadStateHolder.update(fileName, DownloadStatus.Failed(error))
+                showResultNotification(
+                    fileName.hashCode(),
+                    getString(R.string.notif_failed_title),
+                    "$fileName: $error"
+                )
+                stopIfIdle()
+            }
+        })
+    }
+
     private fun stopIfIdle() {
-        if (activeDownloaders.isEmpty()) {
+        if (activeTasks.isEmpty()) {
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -264,6 +342,16 @@ class DownloadService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
+        val pauseIntent = PendingIntent.getService(
+            this,
+            fileName.hashCode() + 1,
+            Intent(this, DownloadService::class.java).apply {
+                action = ACTION_PAUSE
+                putExtra(EXTRA_FILE_NAME, fileName)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val cancelIntent = PendingIntent.getService(
             this,
             fileName.hashCode(),
@@ -288,6 +376,13 @@ class DownloadService : Service() {
             .setProgress(100, progressPercent, indeterminate)
             .setOngoing(true)
             .setContentIntent(openAppIntent)
+            .addAction(
+                Notification.Action.Builder(
+                    null,
+                    getString(R.string.btn_pause),
+                    pauseIntent
+                ).build()
+            )
             .addAction(
                 Notification.Action.Builder(
                     null,

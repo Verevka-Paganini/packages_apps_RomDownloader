@@ -27,13 +27,25 @@ class MultiThreadDownloader(
 ) {
     interface Listener {
         fun onProgress(downloadedBytes: Long, totalBytes: Long, speedBytesPerSec: Long, mirrorHost: String)
+        fun onPaused(downloadedBytes: Long, totalBytes: Long, mirrorHost: String)
         fun onVerifying()
         fun onCompleted(fileName: String, sha256: String, mirrorHost: String)
         fun onError(error: String)
     }
 
+    private data class ChunkState(
+        val start: Long,
+        val end: Long,
+        val current: AtomicLong
+    )
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isCancelled = AtomicBoolean(false)
+    private val isPaused = AtomicBoolean(false)
+
+    fun pause() {
+        isPaused.set(true)
+    }
 
     fun cancel() {
         isCancelled.set(true)
@@ -43,28 +55,63 @@ class MultiThreadDownloader(
         val managerExecutor = Executors.newSingleThreadExecutor()
         managerExecutor.execute {
             val tempFile = File(context.cacheDir, "$fileName.part")
+            val metaFile = File(context.cacheDir, "$fileName.part.meta")
+            var mirrorHost = ""
+            var totalBytes = -1L
+            val chunks = mutableListOf<ChunkState>()
+
             try {
                 val targetUrl = applyMirrorParam(downloadUrl, mirror)
                 val probe = resolveDirectUrl(targetUrl)
                 val directUrl = probe.finalUrl
-                val mirrorHost = extractHost(directUrl)
-                val totalBytes = probe.contentLength
+                mirrorHost = extractHost(directUrl)
+                totalBytes = probe.contentLength
                 val supportsRanges = probe.supportsRanges
-                if (tempFile.exists()) tempFile.delete()
 
-                val effectiveThreads = if (supportsRanges && totalBytes > 1024 * 1024) threadCount else 1
-                val downloadedBytes = AtomicLong(0L)
-
-                if (totalBytes > 0) {
-                    RandomAccessFile(tempFile, "rw").use { it.setLength(totalBytes) }
+                val loadedChunks = if (supportsRanges && totalBytes > 0 && tempFile.exists() && metaFile.exists()) {
+                    loadMeta(metaFile, totalBytes)
+                } else {
+                    null
                 }
 
-                var lastBytes = 0L
+                if (loadedChunks != null && loadedChunks.isNotEmpty()) {
+                    chunks.addAll(loadedChunks)
+                } else {
+                    if (tempFile.exists()) tempFile.delete()
+                    if (metaFile.exists()) metaFile.delete()
+
+                    val effectiveThreads = if (supportsRanges && totalBytes > 1024 * 1024) threadCount else 1
+                    if (totalBytes > 0) {
+                        RandomAccessFile(tempFile, "rw").use { it.setLength(totalBytes) }
+                    }
+
+                    if (effectiveThreads == 1) {
+                        val end = if (totalBytes > 0) totalBytes - 1 else -1L
+                        chunks.add(ChunkState(0L, end, AtomicLong(0L)))
+                    } else {
+                        val chunkSize = totalBytes / effectiveThreads
+                        for (i in 0 until effectiveThreads) {
+                            val start = i * chunkSize
+                            val end = if (i == effectiveThreads - 1) totalBytes - 1 else (start + chunkSize - 1)
+                            chunks.add(ChunkState(start, end, AtomicLong(start)))
+                        }
+                    }
+                    if (supportsRanges && totalBytes > 0) {
+                        saveMeta(metaFile, totalBytes, chunks)
+                    }
+                }
+
+                fun calcDownloaded(): Long = chunks.sumOf { (it.current.get() - it.start).coerceAtLeast(0L) }
+
+                var lastBytes = calcDownloaded()
                 var lastTime = System.currentTimeMillis()
 
                 val reportTask = Runnable {
+                    if (supportsRanges && totalBytes > 0) {
+                        saveMeta(metaFile, totalBytes, chunks)
+                    }
                     val now = System.currentTimeMillis()
-                    val current = downloadedBytes.get()
+                    val current = calcDownloaded()
                     val elapsedMs = (now - lastTime).coerceAtLeast(1L)
                     val speed = ((current - lastBytes) * 1000L) / elapsedMs
                     lastBytes = current
@@ -75,47 +122,51 @@ class MultiThreadDownloader(
                     }
                 }
 
-                val workerPool = Executors.newFixedThreadPool(effectiveThreads)
-                val tasks = mutableListOf<Callable<Unit>>()
-
-                if (effectiveThreads == 1) {
-                    tasks.add(Callable {
-                        downloadChunk(directUrl, tempFile, 0L, -1L, downloadedBytes)
-                    })
-                } else {
-                    val chunkSize = totalBytes / effectiveThreads
-                    for (i in 0 until effectiveThreads) {
-                        val start = i * chunkSize
-                        val end = if (i == effectiveThreads - 1) totalBytes - 1 else (start + chunkSize - 1)
-                        tasks.add(Callable {
-                            downloadChunk(directUrl, tempFile, start, end, downloadedBytes)
-                        })
-                    }
-                }
-
-                val progressThread = Thread {
-                    while (!Thread.currentThread().isInterrupted && !isCancelled.get()) {
-                        reportTask.run()
-                        try {
-                            Thread.sleep(500)
-                        } catch (_: InterruptedException) {
-                            break
+                val activeChunks = chunks.filter { it.end < 0L || it.current.get() <= it.end }
+                if (activeChunks.isNotEmpty()) {
+                    val workerPool = Executors.newFixedThreadPool(activeChunks.size)
+                    val tasks = activeChunks.map { chunk ->
+                        Callable {
+                            downloadChunk(directUrl, tempFile, chunk)
                         }
                     }
-                }.apply { start() }
 
-                try {
-                    val futures = workerPool.invokeAll(tasks)
-                    for (future in futures) {
-                        future.get()
+                    val progressThread = Thread {
+                        while (!Thread.currentThread().isInterrupted && !isCancelled.get() && !isPaused.get()) {
+                            reportTask.run()
+                            try {
+                                Thread.sleep(500)
+                            } catch (_: InterruptedException) {
+                                break
+                            }
+                        }
+                    }.apply { start() }
+
+                    try {
+                        val futures = workerPool.invokeAll(tasks)
+                        for (future in futures) {
+                            future.get()
+                        }
+                    } finally {
+                        progressThread.interrupt()
+                        workerPool.shutdownNow()
                     }
-                } finally {
-                    progressThread.interrupt()
-                    workerPool.shutdownNow()
                 }
 
                 if (isCancelled.get()) {
                     tempFile.delete()
+                    metaFile.delete()
+                    return@execute
+                }
+
+                if (isPaused.get()) {
+                    if (supportsRanges && totalBytes > 0) {
+                        saveMeta(metaFile, totalBytes, chunks)
+                    }
+                    val current = calcDownloaded()
+                    mainHandler.post {
+                        listener.onPaused(current, totalBytes, mirrorHost)
+                    }
                     return@execute
                 }
 
@@ -130,24 +181,69 @@ class MultiThreadDownloader(
 
                 if (isCancelled.get()) {
                     tempFile.delete()
+                    metaFile.delete()
                     return@execute
                 }
 
                 moveToDownloads(tempFile, fileName)
+                metaFile.delete()
 
                 mainHandler.post {
                     listener.onCompleted(fileName, sha256, mirrorHost)
                 }
             } catch (e: Exception) {
-                tempFile.delete()
-                if (!isCancelled.get()) {
+                if (isPaused.get()) {
+                    val current = chunks.sumOf { (it.current.get() - it.start).coerceAtLeast(0L) }
                     mainHandler.post {
-                        listener.onError(e.localizedMessage ?: e.javaClass.simpleName)
+                        listener.onPaused(current, totalBytes, mirrorHost)
+                    }
+                } else {
+                    tempFile.delete()
+                    metaFile.delete()
+                    if (!isCancelled.get()) {
+                        mainHandler.post {
+                            listener.onError(e.localizedMessage ?: e.javaClass.simpleName)
+                        }
                     }
                 }
             } finally {
                 managerExecutor.shutdown()
             }
+        }
+    }
+
+    private fun saveMeta(metaFile: File, totalBytes: Long, chunks: List<ChunkState>) {
+        try {
+            val sb = StringBuilder()
+            sb.append(totalBytes).append('\n')
+            for (c in chunks) {
+                sb.append(c.start).append(':').append(c.current.get()).append(':').append(c.end).append('\n')
+            }
+            metaFile.writeText(sb.toString())
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun loadMeta(metaFile: File, expectedTotalBytes: Long): List<ChunkState>? {
+        return try {
+            val lines = metaFile.readLines().filter { it.isNotBlank() }
+            if (lines.size < 2) return null
+            val savedTotal = lines[0].trim().toLongOrNull() ?: return null
+            if (savedTotal != expectedTotalBytes) return null
+
+            val list = mutableListOf<ChunkState>()
+            for (i in 1 until lines.size) {
+                val parts = lines[i].split(':')
+                if (parts.size != 3) return null
+                val start = parts[0].toLong()
+                val current = parts[1].toLong()
+                val end = parts[2].toLong()
+                if (current < start || current > end + 1) return null
+                list.add(ChunkState(start, end, AtomicLong(current)))
+            }
+            list
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -254,33 +350,39 @@ class MultiThreadDownloader(
     private fun downloadChunk(
         urlStr: String,
         targetFile: File,
-        startByte: Long,
-        endByte: Long,
-        downloadedCounter: AtomicLong
+        chunk: ChunkState
     ) {
+        val startOffset = chunk.current.get()
+        val endByte = chunk.end
+        if (endByte >= 0L && startOffset > endByte) return
+
         val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
             connectTimeout = 15000
             readTimeout = 30000
             setRequestProperty("User-Agent", "Wget/1.21.4")
-            if (endByte >= startByte) {
-                setRequestProperty("Range", "bytes=$startByte-$endByte")
+            if (endByte >= startOffset) {
+                setRequestProperty("Range", "bytes=$startOffset-$endByte")
             }
         }
 
         val code = conn.responseCode
         if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-            throw IllegalStateException("HTTP $code on chunk $startByte-$endByte")
+            throw IllegalStateException("HTTP $code on chunk $startOffset-$endByte")
+        }
+
+        if (startOffset > 0L && code != HttpURLConnection.HTTP_PARTIAL) {
+            throw IllegalStateException("Mirror does not support Range resume (HTTP $code)")
         }
 
         conn.inputStream.use { input ->
             RandomAccessFile(targetFile, "rw").use { raf ->
-                raf.seek(startByte)
+                raf.seek(startOffset)
                 val buffer = ByteArray(65536)
                 var read: Int
                 while (input.read(buffer).also { read = it } != -1) {
-                    if (isCancelled.get()) return
+                    if (isCancelled.get() || isPaused.get()) return
                     raf.write(buffer, 0, read)
-                    downloadedCounter.addAndGet(read.toLong())
+                    chunk.current.addAndGet(read.toLong())
                 }
             }
         }

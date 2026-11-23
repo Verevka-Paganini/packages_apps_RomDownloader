@@ -5,12 +5,15 @@
     <string name="available_builds">Available builds</string>
     <string name="btn_refresh">Refresh</string>
     <string name="btn_download">Download ZIP</string>
+    <string name="btn_pause">Pause</string>
+    <string name="btn_resume">Resume</string>
     <string name="btn_cancel">Cancel</string>
     <string name="no_builds_found">No builds found</string>
     <string name="root_folder">Root directory</string>
     <string name="build_details">Date: %1$s  •  Size: %2$s</string>
     <string name="size_unknown">Unknown</string>
     <string name="download_preparing">Connecting to mirror…</string>
+    <string name="download_paused">Paused  •  %1$d%% (%2$s / %3$s)</string>
     <string name="download_verifying">Verifying ZIP &amp; SHA-256…</string>
     <string name="download_progress">%1$d%%  •  %2$s/s  (%3$s / %4$s)</string>
     <string name="download_completed">Saved to Downloads</string>
@@ -18,6 +21,7 @@
     <string name="toast_sha256_copied">SHA-256 copied to clipboard</string>
     <string name="notif_channel_name">Firmware Downloads</string>
     <string name="notif_downloading_title">Downloading %1$s</string>
+    <string name="notif_paused_title">Paused: %1$s</string>
     <string name="notif_completed_title">Download complete</string>
     <string name="notif_failed_title">Download failed</string>
     <string name="threads_format">%1$d thr</string>

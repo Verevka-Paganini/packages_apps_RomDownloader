@@ -183,6 +183,7 @@ class MainActivity : Activity() {
 
                 val shortLabel = getMirrorDisplayName(selectedMirror)
                 mirrorButton.text = getString(R.string.mirror_btn_format, shortLabel)
+                DownloadService.switchMirrorForActive(this, selectedMirror)
                 Toast.makeText(
                     this,
                     getString(R.string.toast_mirror_set, shortLabel),
@@ -393,6 +394,10 @@ class MainActivity : Activity() {
             getString(R.string.toast_download_started, selectedThreads, build.fileName),
             Toast.LENGTH_SHORT
         ).show()
+    }
+
+    private fun pauseMultiThreadDownload(build: RomBuild) {
+        DownloadService.pauseDownload(this, build.fileName)
     }
 
     private fun cancelMultiThreadDownload(build: RomBuild) {
@@ -694,6 +699,49 @@ class MainActivity : Activity() {
                     cardLayout.addView(progressText)
                 }
 
+                is DownloadStatus.Paused -> {
+                    val percent = if (status.totalBytes > 0) {
+                        ((status.downloadedBytes * 100) / status.totalBytes).toInt().coerceIn(0, 100)
+                    } else {
+                        0
+                    }
+                    val pauseBar = ProgressBar(
+                        this@MainActivity,
+                        null,
+                        android.R.attr.progressBarStyleHorizontal
+                    ).apply {
+                        max = 100
+                        progress = percent
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(4) }
+                    }
+                    val pauseLine = getString(
+                        R.string.download_paused,
+                        percent,
+                        formatFileSize(status.downloadedBytes),
+                        formatFileSize(status.totalBytes)
+                    )
+                    val mirrorSuffix = if (status.mirrorHost.isNotEmpty()) {
+                        "\n${getString(R.string.mirror_host_label, status.mirrorHost)}"
+                    } else {
+                        ""
+                    }
+                    val pauseText = TextView(this@MainActivity).apply {
+                        text = pauseLine + mirrorSuffix
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setTextColor(Color.parseColor("#FF9800"))
+                        setTypeface(null, Typeface.BOLD)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { bottomMargin = dp(8) }
+                    }
+                    cardLayout.addView(pauseBar)
+                    cardLayout.addView(pauseText)
+                }
+
                 is DownloadStatus.Verifying -> {
                     val verifyBar = ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
                         isIndeterminate = true
@@ -760,27 +808,68 @@ class MainActivity : Activity() {
                 null -> Unit
             }
 
-            val isDownloading = status is DownloadStatus.Preparing ||
-                status is DownloadStatus.Running ||
-                status is DownloadStatus.Verifying
-            val actionBtn = Button(this@MainActivity).apply {
-                text = if (isDownloading) getString(R.string.btn_cancel) else getString(R.string.btn_download)
+            val btnRow = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    gravity = Gravity.END
-                }
-                setOnClickListener {
-                    if (isDownloading) {
-                        cancelMultiThreadDownload(build)
-                    } else {
-                        startMultiThreadDownload(build)
+                )
+            }
+
+            when (status) {
+                is DownloadStatus.Preparing, is DownloadStatus.Running -> {
+                    val pauseBtn = Button(this@MainActivity).apply {
+                        text = getString(R.string.btn_pause)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { marginEnd = dp(8) }
+                        setOnClickListener { pauseMultiThreadDownload(build) }
                     }
+                    val cancelBtn = Button(this@MainActivity).apply {
+                        text = getString(R.string.btn_cancel)
+                        setOnClickListener { cancelMultiThreadDownload(build) }
+                    }
+                    btnRow.addView(pauseBtn)
+                    btnRow.addView(cancelBtn)
+                }
+
+                is DownloadStatus.Paused -> {
+                    val resumeBtn = Button(this@MainActivity).apply {
+                        text = getString(R.string.btn_resume)
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { marginEnd = dp(8) }
+                        setOnClickListener { startMultiThreadDownload(build) }
+                    }
+                    val cancelBtn = Button(this@MainActivity).apply {
+                        text = getString(R.string.btn_cancel)
+                        setOnClickListener { cancelMultiThreadDownload(build) }
+                    }
+                    btnRow.addView(resumeBtn)
+                    btnRow.addView(cancelBtn)
+                }
+
+                is DownloadStatus.Verifying -> {
+                    val cancelBtn = Button(this@MainActivity).apply {
+                        text = getString(R.string.btn_cancel)
+                        setOnClickListener { cancelMultiThreadDownload(build) }
+                    }
+                    btnRow.addView(cancelBtn)
+                }
+
+                else -> {
+                    val downloadBtn = Button(this@MainActivity).apply {
+                        text = getString(R.string.btn_download)
+                        setOnClickListener { startMultiThreadDownload(build) }
+                    }
+                    btnRow.addView(downloadBtn)
                 }
             }
 
-            cardLayout.addView(actionBtn)
+            cardLayout.addView(btnRow)
             return cardLayout
         }
     }
