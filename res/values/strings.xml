@@ -22,6 +22,11 @@
     <string name="notif_failed_title">Download failed</string>
     <string name="threads_format">%1$d thr</string>
     <string name="toast_threads_set">Download threads: %1$d</string>
+    <string name="mirror_auto">Auto</string>
+    <string name="mirror_btn_format">Mirror: %1$s</string>
+    <string name="dialog_select_mirror">Select SourceForge mirror</string>
+    <string name="toast_mirror_set">Mirror: %1$s</string>
+    <string name="mirror_host_label">Mirror: %1$s</string>
     <string name="toast_download_started">Downloading (%1$d thr): %2$s</string>
     <string name="toast_download_cancelled">Download cancelled</string>
     <string name="toast_error">Error: %1$s</string>

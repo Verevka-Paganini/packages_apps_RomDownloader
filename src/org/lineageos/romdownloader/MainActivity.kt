@@ -2,6 +2,7 @@ package org.lineageos.romdownloader
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -61,7 +62,28 @@ class MainActivity : Activity() {
 
         private const val PREFS_NAME = "rom_downloader_prefs"
         private const val KEY_THREAD_COUNT = "thread_count"
+        private const val KEY_MIRROR = "selected_mirror"
         private val THREAD_OPTIONS = listOf(2, 4, 6, 8)
+        private val MIRROR_IDS = listOf(
+            "auto",
+            "netactuate",
+            "gigenet",
+            "liquidtelecom",
+            "cyfuture",
+            "deac-ams",
+            "nchc",
+            "ixpeering"
+        )
+        private val MIRROR_LABELS = listOf(
+            "Auto",
+            "NetActuate (US/EU)",
+            "Gigenet (US)",
+            "Liquid Telecom",
+            "CyFuture",
+            "DEAC (Amsterdam)",
+            "NCHC (Taiwan)",
+            "IX Peering"
+        )
 
         val RSS_URL: String
             get() = "https://sourceforge.net/projects/$PROJECT_NAME/rss?limit=100"
@@ -75,8 +97,10 @@ class MainActivity : Activity() {
     private lateinit var listView: ListView
     private lateinit var refreshButton: Button
     private lateinit var threadsButton: Button
+    private lateinit var mirrorButton: Button
 
     private var selectedThreads: Int = DownloadService.DEFAULT_THREADS
+    private var selectedMirror: String = DownloadService.DEFAULT_MIRROR
 
     private var groupedBuilds: Map<String, List<RomBuild>> = emptyMap()
     private var sortedFolderKeys: List<String> = emptyList()
@@ -94,6 +118,8 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val saved = prefs.getInt(KEY_THREAD_COUNT, DownloadService.DEFAULT_THREADS)
         selectedThreads = if (saved in THREAD_OPTIONS) saved else DownloadService.DEFAULT_THREADS
+        val savedMirror = prefs.getString(KEY_MIRROR, DownloadService.DEFAULT_MIRROR) ?: DownloadService.DEFAULT_MIRROR
+        selectedMirror = if (savedMirror in MIRROR_IDS) savedMirror else DownloadService.DEFAULT_MIRROR
 
         val deviceTitle = DEVICE_FOLDER.ifEmpty { PROJECT_NAME }
         title = getString(R.string.title_with_device, deviceTitle)
@@ -136,6 +162,38 @@ class MainActivity : Activity() {
         ).show()
     }
 
+    private fun getMirrorDisplayName(mirrorId: String): String {
+        return if (mirrorId == "auto") getString(R.string.mirror_auto) else mirrorId
+    }
+
+    private fun showMirrorPickerDialog() {
+        val displayItems = MIRROR_LABELS.mapIndexed { index, label ->
+            if (index == 0) getString(R.string.mirror_auto) else label
+        }.toTypedArray()
+        val checkedIndex = MIRROR_IDS.indexOf(selectedMirror).coerceAtLeast(0)
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.dialog_select_mirror)
+            .setSingleChoiceItems(displayItems, checkedIndex) { dialog, which ->
+                selectedMirror = MIRROR_IDS[which]
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_MIRROR, selectedMirror)
+                    .apply()
+
+                val shortLabel = getMirrorDisplayName(selectedMirror)
+                mirrorButton.text = getString(R.string.mirror_btn_format, shortLabel)
+                Toast.makeText(
+                    this,
+                    getString(R.string.toast_mirror_set, shortLabel),
+                    Toast.LENGTH_SHORT
+                ).show()
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.btn_cancel, null)
+            .show()
+    }
+
     private fun setupUi() {
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -164,16 +222,30 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        threadsButton = Button(this).apply {
-            text = getString(R.string.threads_format, selectedThreads)
+        mirrorButton = Button(this).apply {
+            text = getString(R.string.mirror_btn_format, getMirrorDisplayName(selectedMirror))
             minWidth = 0
             minimumWidth = 0
-            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                marginEnd = dp(8)
+                marginEnd = dp(6)
+            }
+            setOnClickListener { showMirrorPickerDialog() }
+        }
+
+        threadsButton = Button(this).apply {
+            text = getString(R.string.threads_format, selectedThreads)
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = dp(6)
             }
             setOnClickListener { cycleThreadCount() }
         }
@@ -184,6 +256,7 @@ class MainActivity : Activity() {
         }
 
         topBar.addView(headerText)
+        topBar.addView(mirrorButton)
         topBar.addView(threadsButton)
         topBar.addView(refreshButton)
         rootLayout.addView(topBar)
@@ -314,7 +387,7 @@ class MainActivity : Activity() {
     }
 
     private fun startMultiThreadDownload(build: RomBuild) {
-        DownloadService.startDownload(this, build.downloadUrl, build.fileName, selectedThreads)
+        DownloadService.startDownload(this, build.downloadUrl, build.fileName, selectedThreads, selectedMirror)
         Toast.makeText(
             this,
             getString(R.string.toast_download_started, selectedThreads, build.fileName),
@@ -596,14 +669,20 @@ class MainActivity : Activity() {
                             ViewGroup.LayoutParams.WRAP_CONTENT
                         ).apply { bottomMargin = dp(4) }
                     }
+                    val progressLine = getString(
+                        R.string.download_progress,
+                        percent,
+                        formatFileSize(status.speedBytesPerSec),
+                        formatFileSize(status.downloadedBytes),
+                        formatFileSize(status.totalBytes)
+                    )
+                    val mirrorSuffix = if (status.mirrorHost.isNotEmpty()) {
+                        "\n${getString(R.string.mirror_host_label, status.mirrorHost)}"
+                    } else {
+                        ""
+                    }
                     val progressText = TextView(this@MainActivity).apply {
-                        text = getString(
-                            R.string.download_progress,
-                            percent,
-                            formatFileSize(status.speedBytesPerSec),
-                            formatFileSize(status.downloadedBytes),
-                            formatFileSize(status.totalBytes)
-                        )
+                        text = progressLine + mirrorSuffix
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         setTypeface(null, Typeface.BOLD)
                         layoutParams = LinearLayout.LayoutParams(
@@ -638,8 +717,13 @@ class MainActivity : Activity() {
 
                 is DownloadStatus.Completed -> {
                     val shortHash = status.sha256.take(16)
+                    val mirrorInfo = if (status.mirrorHost.isNotEmpty()) {
+                        "\n${getString(R.string.mirror_host_label, status.mirrorHost)}"
+                    } else {
+                        ""
+                    }
                     val doneText = TextView(this@MainActivity).apply {
-                        text = "✅ ${getString(R.string.download_completed)}\n${getString(R.string.sha256_tap_copy, shortHash)}"
+                        text = "✅ ${getString(R.string.download_completed)}$mirrorInfo\n${getString(R.string.sha256_tap_copy, shortHash)}"
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                         setTextColor(Color.parseColor("#4CAF50"))
                         setTypeface(null, Typeface.BOLD)

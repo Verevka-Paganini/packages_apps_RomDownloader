@@ -22,6 +22,11 @@
     <string name="notif_failed_title">Ошибка загрузки</string>
     <string name="threads_format">%1$d пот.</string>
     <string name="toast_threads_set">Потоков скачивания: %1$d</string>
+    <string name="mirror_auto">Авто</string>
+    <string name="mirror_btn_format">Зеркало: %1$s</string>
+    <string name="dialog_select_mirror">Выбор зеркала SourceForge</string>
+    <string name="toast_mirror_set">Зеркало: %1$s</string>
+    <string name="mirror_host_label">Зеркало: %1$s</string>
     <string name="toast_download_started">Загрузка в %1$d пот.: %2$s</string>
     <string name="toast_download_cancelled">Загрузка отменена</string>
     <string name="toast_error">Ошибка: %1$s</string>

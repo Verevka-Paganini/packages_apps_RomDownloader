@@ -11,6 +11,7 @@ import android.provider.MediaStore
 import java.io.File
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.Callable
@@ -21,12 +22,13 @@ import java.util.zip.ZipFile
 
 class MultiThreadDownloader(
     private val context: Context,
-    private val threadCount: Int = 6
+    private val threadCount: Int = 6,
+    private val mirror: String = "auto"
 ) {
     interface Listener {
-        fun onProgress(downloadedBytes: Long, totalBytes: Long, speedBytesPerSec: Long)
+        fun onProgress(downloadedBytes: Long, totalBytes: Long, speedBytesPerSec: Long, mirrorHost: String)
         fun onVerifying()
-        fun onCompleted(fileName: String, sha256: String)
+        fun onCompleted(fileName: String, sha256: String, mirrorHost: String)
         fun onError(error: String)
     }
 
@@ -42,8 +44,10 @@ class MultiThreadDownloader(
         managerExecutor.execute {
             val tempFile = File(context.cacheDir, "$fileName.part")
             try {
-                val probe = resolveDirectUrl(downloadUrl)
+                val targetUrl = applyMirrorParam(downloadUrl, mirror)
+                val probe = resolveDirectUrl(targetUrl)
                 val directUrl = probe.finalUrl
+                val mirrorHost = extractHost(directUrl)
                 val totalBytes = probe.contentLength
                 val supportsRanges = probe.supportsRanges
                 if (tempFile.exists()) tempFile.delete()
@@ -67,7 +71,7 @@ class MultiThreadDownloader(
                     lastTime = now
 
                     mainHandler.post {
-                        listener.onProgress(current, totalBytes, speed)
+                        listener.onProgress(current, totalBytes, speed, mirrorHost)
                     }
                 }
 
@@ -132,7 +136,7 @@ class MultiThreadDownloader(
                 moveToDownloads(tempFile, fileName)
 
                 mainHandler.post {
-                    listener.onCompleted(fileName, sha256)
+                    listener.onCompleted(fileName, sha256, mirrorHost)
                 }
             } catch (e: Exception) {
                 tempFile.delete()
@@ -176,6 +180,29 @@ class MultiThreadDownloader(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun applyMirrorParam(rawUrl: String, selectedMirror: String): String {
+        val cleanMirror = selectedMirror.trim()
+        if (cleanMirror.isEmpty() || cleanMirror.equals("auto", ignoreCase = true)) {
+            return rawUrl
+        }
+        if (!rawUrl.contains("sourceforge.net", ignoreCase = true)) {
+            return rawUrl
+        }
+        if (rawUrl.contains("use_mirror=", ignoreCase = true)) {
+            return rawUrl
+        }
+        val separator = if (rawUrl.contains("?")) "&" else "?"
+        return "$rawUrl${separator}use_mirror=$cleanMirror"
+    }
+
+    private fun extractHost(urlStr: String): String {
+        return try {
+            URI(urlStr).host ?: ""
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     private data class ProbeResult(

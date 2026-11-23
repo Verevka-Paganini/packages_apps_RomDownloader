@@ -20,10 +20,11 @@ sealed class DownloadStatus {
     data class Running(
         val downloadedBytes: Long,
         val totalBytes: Long,
-        val speedBytesPerSec: Long
+        val speedBytesPerSec: Long,
+        val mirrorHost: String = ""
     ) : DownloadStatus()
     data object Verifying : DownloadStatus()
-    data class Completed(val sha256: String) : DownloadStatus()
+    data class Completed(val sha256: String, val mirrorHost: String = "") : DownloadStatus()
     data class Failed(val error: String) : DownloadStatus()
 }
 
@@ -62,17 +63,26 @@ class DownloadService : Service() {
         const val EXTRA_URL = "extra_url"
         const val EXTRA_FILE_NAME = "extra_file_name"
         const val EXTRA_THREADS = "extra_threads"
+        const val EXTRA_MIRROR = "extra_mirror"
         const val DEFAULT_THREADS = 6
+        const val DEFAULT_MIRROR = "auto"
 
         private const val CHANNEL_ID = "rom_downloads_channel"
         private const val FOREGROUND_NOTIF_ID = 1001
 
-        fun startDownload(context: Context, url: String, fileName: String, threadCount: Int = DEFAULT_THREADS) {
+        fun startDownload(
+            context: Context,
+            url: String,
+            fileName: String,
+            threadCount: Int = DEFAULT_THREADS,
+            mirror: String = DEFAULT_MIRROR
+        ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_URL, url)
                 putExtra(EXTRA_FILE_NAME, fileName)
                 putExtra(EXTRA_THREADS, threadCount)
+                putExtra(EXTRA_MIRROR, mirror)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -107,6 +117,7 @@ class DownloadService : Service() {
             ACTION_START -> {
                 val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
                 val threads = intent.getIntExtra(EXTRA_THREADS, DEFAULT_THREADS).coerceIn(1, 16)
+                val mirror = intent.getStringExtra(EXTRA_MIRROR) ?: DEFAULT_MIRROR
                 if (activeDownloaders.containsKey(fileName)) return START_NOT_STICKY
 
                 acquireWakeLock()
@@ -128,14 +139,23 @@ class DownloadService : Service() {
                     startForeground(FOREGROUND_NOTIF_ID, initialNotif)
                 }
 
-                val downloader = MultiThreadDownloader(applicationContext, threadCount = threads)
+                val downloader = MultiThreadDownloader(
+                    applicationContext,
+                    threadCount = threads,
+                    mirror = mirror
+                )
                 activeDownloaders[fileName] = downloader
 
                 downloader.download(url, fileName, object : MultiThreadDownloader.Listener {
-                    override fun onProgress(downloadedBytes: Long, totalBytes: Long, speedBytesPerSec: Long) {
+                    override fun onProgress(
+                        downloadedBytes: Long,
+                        totalBytes: Long,
+                        speedBytesPerSec: Long,
+                        mirrorHost: String
+                    ) {
                         DownloadStateHolder.update(
                             fileName,
-                            DownloadStatus.Running(downloadedBytes, totalBytes, speedBytesPerSec)
+                            DownloadStatus.Running(downloadedBytes, totalBytes, speedBytesPerSec, mirrorHost)
                         )
                         val percent = if (totalBytes > 0) {
                             ((downloadedBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
@@ -162,9 +182,9 @@ class DownloadService : Service() {
                         )
                     }
 
-                    override fun onCompleted(fileName: String, sha256: String) {
+                    override fun onCompleted(fileName: String, sha256: String, mirrorHost: String) {
                         activeDownloaders.remove(fileName)
-                        DownloadStateHolder.update(fileName, DownloadStatus.Completed(sha256))
+                        DownloadStateHolder.update(fileName, DownloadStatus.Completed(sha256, mirrorHost))
                         showResultNotification(
                             fileName.hashCode(),
                             getString(R.string.notif_completed_title),
