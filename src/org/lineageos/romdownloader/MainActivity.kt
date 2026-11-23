@@ -216,21 +216,16 @@ class MainActivity : Activity() {
             }
         }
 
-        val headerText = TextView(this).apply {
-            text = getString(R.string.available_builds)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            setTypeface(null, Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
         mirrorButton = Button(this).apply {
             text = getString(R.string.mirror_btn_format, getMirrorDisplayName(selectedMirror))
             minWidth = 0
             minimumWidth = 0
-            setPadding(dp(10), dp(6), dp(10), dp(6))
+            maxLines = 1
+            setPadding(dp(8), dp(6), dp(8), dp(6))
             layoutParams = LinearLayout.LayoutParams(
+                0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                1.3f
             ).apply {
                 marginEnd = dp(6)
             }
@@ -241,10 +236,12 @@ class MainActivity : Activity() {
             text = getString(R.string.threads_format, selectedThreads)
             minWidth = 0
             minimumWidth = 0
-            setPadding(dp(10), dp(6), dp(10), dp(6))
+            maxLines = 1
+            setPadding(dp(8), dp(6), dp(8), dp(6))
             layoutParams = LinearLayout.LayoutParams(
+                0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                0.8f
             ).apply {
                 marginEnd = dp(6)
             }
@@ -253,10 +250,18 @@ class MainActivity : Activity() {
 
         refreshButton = Button(this).apply {
             text = getString(R.string.btn_refresh)
+            minWidth = 0
+            minimumWidth = 0
+            maxLines = 1
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
             setOnClickListener { loadRssFeed() }
         }
 
-        topBar.addView(headerText)
         topBar.addView(mirrorButton)
         topBar.addView(threadsButton)
         topBar.addView(refreshButton)
